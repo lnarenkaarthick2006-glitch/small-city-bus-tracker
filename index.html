@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Real-Time Public Transport Tracker</title>
+
+  <link rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #eef2f7;
+      color: #1e293b;
+    }
+
+    header {
+      background: #123b66;
+      color: white;
+      padding: 18px 10px;
+      text-align: center;
+    }
+
+    header h1 {
+      margin: 0 0 8px;
+      font-size: 23px;
+    }
+
+    header p {
+      margin: 0;
+      font-size: 14px;
+    }
+
+    .info {
+      background: white;
+      margin: 12px;
+      padding: 16px;
+      border-radius: 10px;
+      box-shadow: 0 2px 6px #cbd5e1;
+    }
+
+    .info p {
+      margin: 10px 0;
+      overflow-wrap: anywhere;
+    }
+
+    #status {
+      font-weight: bold;
+      color: #b45309;
+    }
+
+    .controls {
+      margin: 12px;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      padding: 11px 14px;
+      border: 0;
+      border-radius: 8px;
+      background: #123b66;
+      color: white;
+      font-size: 14px;
+      cursor: pointer;
+    }
+
+    button:active {
+      opacity: 0.8;
+    }
+
+    #map {
+      height: 58vh;
+      min-height: 350px;
+      margin: 12px;
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+    }
+
+    footer {
+      padding: 12px;
+      text-align: center;
+      color: #475569;
+      font-size: 12px;
+    }
+  </style>
+</head>
+
+<body>
+
+  <header>
+    <h1>🚌 Small City Bus Tracker</h1>
+    <p>Real-Time Public Transport Tracking System</p>
+  </header>
+
+  <div class="info">
+    <h3>Live Bus Information</h3>
+
+    <p><b>Bus ID:</b> <span id="busId">BUS001</span></p>
+    <p><b>Latitude:</b> <span id="lat">Waiting...</span></p>
+    <p><b>Longitude:</b> <span id="lng">Waiting...</span></p>
+    <p><b>Speed:</b> <span id="speed">Waiting...</span> km/h</p>
+    <p><b>GPS Satellites:</b> <span id="satellites">Waiting...</span></p>
+    <p><b>Status:</b> <span id="status">Connecting...</span></p>
+    <p><b>Last update:</b> <span id="updated">-</span></p>
+  </div>
+
+  <div class="controls">
+    <button onclick="showSatellite()">Satellite View</button>
+    <button onclick="showStreet()">Street View</button>
+    <button onclick="centerOnBus()">Find Bus</button>
+  </div>
+
+  <div id="map"></div>
+
+  <footer>
+    ESP32 + NEO-6M GPS + Firebase Realtime Database
+  </footer>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <script>
+    // Your existing Firebase database
+    const FIREBASE_URL =
+      "https://smallcitybustracker-3a1ac-default-rtdb.firebaseio.com/buses/BUS001.json";
+
+    // Create the map
+    const map = L.map("map").setView(
+      [10.94495, 77.030377],
+      17
+    );
+
+    // Satellite imagery
+    const satelliteLayer = L.tileLayer(
+      "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+      {
+        attribution: "Tiles &copy; Esri and imagery contributors",
+        maxZoom: 19
+      }
+    );
+
+    // Street map option
+    const streetLayer = L.tileLayer(
+      "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+      {
+        attribution: "&copy; OpenStreetMap contributors",
+        maxZoom: 19
+      }
+    );
+
+    // Start in satellite view
+    satelliteLayer.addTo(map);
+
+    // Bus icon
+    const busIcon = L.divIcon({
+      html: '<div style="font-size:32px;">🚌</div>',
+      className: "",
+      iconSize: [40, 40],
+      iconAnchor: [20, 20]
+    });
+
+    let busMarker = null;
+    let latestPosition = null;
+    let lastPositionKey = "";
+    let requestInProgress = false;
+
+    function showSatellite() {
+      if (map.hasLayer(streetLayer)) {
+        map.removeLayer(streetLayer);
+      }
+      if (!map.hasLayer(satelliteLayer)) {
+        satelliteLayer.addTo(map);
+      }
+    }
+
+    function showStreet() {
+      if (map.hasLayer(satelliteLayer)) {
+        map.removeLayer(satelliteLayer);
+      }
+      if (!map.hasLayer(streetLayer)) {
+        streetLayer.addTo(map);
+      }
+    }
+
+    function centerOnBus() {
+      if (latestPosition) {
+        map.flyTo(latestPosition, 18, {
+          duration: 1
+        });
+
+        if (busMarker) {
+          busMarker.openPopup();
+        }
+      } else {
+        alert("Waiting for bus GPS location.");
+      }
+    }
+
+    async function updateBusLocation() {
+      if (requestInProgress) return;
+      requestInProgress = true;
+
+      const status = document.getElementById("status");
+
+      try {
+        const response = await fetch(
+          FIREBASE_URL + "?t=" + Date.now(),
+          { cache: "no-store" }
+        );
+
+        if (!response.ok) {
+          throw new Error("Firebase HTTP " + response.status);
+        }
+
+        const bus = await response.json();
+
+        if (
+          !bus ||
+          typeof bus.latitude !== "number" ||
+          typeof bus.longitude !== "number"
+        ) {
+          status.textContent = "No valid bus location found";
+          status.style.color = "#b45309";
+          return;
+        }
+
+        const lat = bus.latitude;
+        const lng = bus.longitude;
+
+        if (
+          lat < -90 || lat > 90 ||
+          lng < -180 || lng > 180
+        ) {
+          throw new Error("Invalid GPS coordinates");
+        }
+
+        latestPosition = [lat, lng];
+
+        document.getElementById("busId").textContent =
+          bus.busId || "BUS001";
+
+        document.getElementById("lat").textContent =
+          lat.toFixed(6);
+
+        document.getElementById("lng").textContent =
+          lng.toFixed(6);
+
+        document.getElementById("speed").textContent =
+          Number(bus.speedKmph || 0).toFixed(2);
+
+        document.getElementById("satellites").textContent =
+          bus.satellites ?? "Unknown";
+
+        const positionKey = lat.toFixed(6) + "," + lng.toFixed(6);
+
+        if (busMarker === null) {
+          busMarker = L.marker(latestPosition, {
+            icon: busIcon
+          })
+          .addTo(map)
+          .bindPopup("Bus BUS001");
+
+          map.setView(latestPosition, 18);
+        } else {
+          // Move the marker to the latest GPS coordinates
+          busMarker.setLatLng(latestPosition);
+
+          // Recenter only when the received coordinates change
+          if (positionKey !== lastPositionKey) {
+            map.panTo(latestPosition, {
+              animate: true,
+              duration: 1
+            });
+          }
+        }
+
+        lastPositionKey = positionKey;
+
+        status.textContent = "Connected — GPS data received";
+        status.style.color = "green";
+
+        document.getElementById("updated").textContent =
+          new Date().toLocaleTimeString();
+
+      } catch (error) {
+        status.textContent = "Error: " + error.message;
+        status.style.color = "red";
+      } finally {
+        requestInProgress = false;
+      }
+    }
+
+    // Fetch the current location and refresh every 5 seconds
+    updateBusLocation();
+    setInterval(updateBusLocation, 5000);
+  </script>
+
+</body>
+</html>
